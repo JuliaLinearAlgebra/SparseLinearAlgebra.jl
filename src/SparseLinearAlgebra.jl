@@ -1,6 +1,14 @@
-# This file is a part of Julia. License is MIT: https://julialang.org/license
+module SparseLinearAlgebra
 
-import LinearAlgebra: checksquare
+using Reexport
+@reexport using LinearAlgebra
+using LinearAlgebra: checksquare
+@reexport using SparseArrays
+using SparseArrays: SparseMatrixCSCUnion, getnzval, getrowval, getcolptr
+using SuiteSparse
+
+import Base: *, \, diff, inv
+import LinearAlgebra: dot, factorize, kron, lmul!, mul!, norm, opnorm, rmul!, tril, triu
 
 ## sparse matrix multiplication
 
@@ -986,15 +994,6 @@ function factorize(A::SparseMatrixCSC)
     end
 end
 
-# function factorize(A::Symmetric{Float64,SparseMatrixCSC{Float64,Ti}}) where Ti
-#     F = cholesky(A)
-#     if LinearAlgebra.issuccess(F)
-#         return F
-#     else
-#         ldlt!(F, A)
-#         return F
-#     end
-# end
 function factorize(A::LinearAlgebra.RealHermSymComplexHerm{Float64,<:SparseMatrixCSC})
     F = cholesky(A; check = false)
     if LinearAlgebra.issuccess(F)
@@ -1006,3 +1005,5 @@ function factorize(A::LinearAlgebra.RealHermSymComplexHerm{Float64,<:SparseMatri
 end
 
 eigen(A::SparseMatrixCSC) = error("Use IterativeEigensolvers.eigs() instead of eigen() for sparse matrices.")
+
+end
