@@ -4,11 +4,833 @@ using Reexport
 @reexport using LinearAlgebra
 using LinearAlgebra: checksquare
 @reexport using SparseArrays
-using SparseArrays: SparseMatrixCSCUnion, getnzval, getrowval, getcolptr
+using SparseArrays: SparseMatrixCSCUnion, SparseVectorUnion, getnzval, getrowval, getcolptr
 using SuiteSparse
 
-import Base: *, \, diff, inv
-import LinearAlgebra: dot, factorize, kron, lmul!, mul!, norm, opnorm, rmul!, tril, triu
+import Base: +, -, *, \, /, adjoint, conj, diff, imag, inv, real, transpose
+import LinearAlgebra: adjoint!, diag, dot, factorize, kron, ldiv!, lmul!, mul!, norm, opnorm, rdiv!, rmul!, transpose!, tril, triu
+
+## transpose
+adjoint!(  X::SparseMatrixCSC{Tv,Ti}, A::SparseMatrixCSC{Tv,Ti}) where {Tv,Ti} = SparseArrays.ftranspose!(X, A, conj)
+transpose!(X::SparseMatrixCSC{Tv,Ti}, A::SparseMatrixCSC{Tv,Ti}) where {Tv,Ti} = SparseArrays.ftranspose!(X, A, identity)
+
+adjoint(  A::SparseMatrixCSC) = Adjoint(A)
+transpose(A::SparseMatrixCSC) = Transpose(A)
+
+Base.copy(A::Adjoint{<:Any,<:SparseMatrixCSC})   = SparseArrays.ftranspose(A.parent, conj)
+Base.copy(A::Transpose{<:Any,<:SparseMatrixCSC}) = SparseArrays.ftranspose(A.parent, identity)
+
+function tril!(A::SparseMatrixCSC, k::Integer = 0, trim::Bool = true)
+    if !(-A.m - 1 <= k <= A.n - 1)
+        throw(ArgumentError(string("the requested diagonal, $k, must be at least ",
+            "$(-A.m - 1) and at most $(A.n - 1) in an $(A.m)-by-$(A.n) matrix")))
+    end
+    SparseArrays.fkeep!(A, (i, j, x) -> i + k >= j, trim)
+end
+function triu!(A::SparseMatrixCSC, k::Integer = 0, trim::Bool = true)
+    if !(-A.m + 1 <= k <= A.n + 1)
+        throw(ArgumentError(string("the requested diagonal, $k, must be at least ",
+            "$(-A.m + 1) and at most $(A.n + 1) in an $(A.m)-by-$(A.n) matrix")))
+    end
+    SparseArrays.fkeep!(A, (i, j, x) -> j >= i + k, trim)
+end
+
+conj!(A::SparseMatrixCSC) = (@inbounds broadcast!(conj, A.nzval, A.nzval); A)
+(-)(A::SparseMatrixCSC) = SparseMatrixCSC(A.m, A.n, copy(A.colptr), copy(A.rowval), map(-, A.nzval))
+
+# the rest of real, conj, imag are handled correctly via AbstractArray methods
+conj(A::SparseMatrixCSC{<:Complex}) =
+    SparseMatrixCSC(A.m, A.n, copy(A.colptr), copy(A.rowval), conj(A.nzval))
+imag(A::SparseMatrixCSC{Tv,Ti}) where {Tv<:Real,Ti} = spzeros(Tv, Ti, A.m, A.n)
+
+## Binary arithmetic and boolean operators
+(+)(A::SparseMatrixCSC, B::SparseMatrixCSC) = map(+, A, B)
+(-)(A::SparseMatrixCSC, B::SparseMatrixCSC) = map(-, A, B)
+
+(+)(A::SparseMatrixCSC, B::Array) = Array(A) + B
+(+)(A::Array, B::SparseMatrixCSC) = A + Array(B)
+(-)(A::SparseMatrixCSC, B::Array) = Array(A) - B
+(-)(A::Array, B::SparseMatrixCSC) = A - Array(B)
+
+## Structure query functions
+issymmetric(A::SparseMatrixCSC) = is_hermsym(A, identity)
+
+ishermitian(A::SparseMatrixCSC) = is_hermsym(A, conj)
+
+function is_hermsym(A::SparseMatrixCSC, check::Function)
+    m, n = size(A)
+    if m != n; return false; end
+
+    colptr = A.colptr
+    rowval = A.rowval
+    nzval = A.nzval
+    tracker = copy(A.colptr)
+    for col = 1:A.n
+        # `tracker` is updated such that, for symmetric matrices,
+        # the loop below starts from an element at or below the
+        # diagonal element of column `col`"
+        for p = tracker[col]:colptr[col+1]-1
+            val = nzval[p]
+            row = rowval[p]
+
+            # Ignore stored zeros
+            if val == 0
+                continue
+            end
+
+            # If the matrix was symmetric we should have updated
+            # the tracker to start at the diagonal or below. Here
+            # we are above the diagonal so the matrix can't be symmetric.
+            if row < col
+                return false
+            end
+
+            # Diagonal element
+            if row == col
+                if val != check(val)
+                    return false
+                end
+            else
+                offset = tracker[row]
+
+                # If the matrix is unsymmetric, there might not exist
+                # a rowval[offset]
+                if offset > length(rowval)
+                    return false
+                end
+
+                row2 = rowval[offset]
+
+                # row2 can be less than col if the tracker didn't
+                # get updated due to stored zeros in previous elements.
+                # We therefore "catch up" here while making sure that
+                # the elements are actually zero.
+                while row2 < col
+                    if nzval[offset] != 0
+                        return false
+                    end
+                    offset += 1
+                    row2 = rowval[offset]
+                    tracker[row] += 1
+                end
+
+                # Non zero A[i,j] exists but A[j,i] does not exist
+                if row2 > col
+                    return false
+                end
+
+                # A[i,j] and A[j,i] exists
+                if row2 == col
+                    if val != check(nzval[offset])
+                        return false
+                    end
+                    tracker[row] += 1
+                end
+            end
+        end
+    end
+    return true
+end
+
+function istriu(A::SparseMatrixCSC)
+    m, n = size(A)
+    colptr = A.colptr
+    rowval = A.rowval
+    nzval  = A.nzval
+
+    for col = 1:min(n, m-1)
+        l1 = colptr[col+1]-1
+        for i = 0 : (l1 - colptr[col])
+            if rowval[l1-i] <= col
+                break
+            end
+            if nzval[l1-i] != 0
+                return false
+            end
+        end
+    end
+    return true
+end
+
+function istril(A::SparseMatrixCSC)
+    m, n = size(A)
+    colptr = A.colptr
+    rowval = A.rowval
+    nzval  = A.nzval
+
+    for col = 2:n
+        for i = colptr[col] : (colptr[col+1]-1)
+            if rowval[i] >= col
+                break
+            end
+            if nzval[i] != 0
+                return false
+            end
+        end
+    end
+    return true
+end
+
+function spdiagm_internal(kv::Pair{<:Integer,<:AbstractVector}...)
+    ncoeffs = 0
+    for p in kv
+        ncoeffs += length(p.second)
+    end
+    I = Vector{Int}(undef, ncoeffs)
+    J = Vector{Int}(undef, ncoeffs)
+    V = Vector{promote_type(map(x -> eltype(x.second), kv)...)}(undef, ncoeffs)
+    i = 0
+    for p in kv
+        dia = p.first
+        vect = p.second
+        numel = length(vect)
+        if dia < 0
+            row = -dia
+            col = 0
+        elseif dia > 0
+            row = 0
+            col = dia
+        else
+            row = 0
+            col = 0
+        end
+        r = 1+i:numel+i
+        I[r] = row+1:row+numel
+        J[r] = col+1:col+numel
+        copyto!(view(V, r), vect)
+        i += numel
+    end
+    return I, J, V
+end
+
+"""
+    spdiagm(kv::Pair{<:Integer,<:AbstractVector}...)
+
+Construct a square sparse diagonal matrix from `Pair`s of vectors and diagonals.
+Vector `kv.second` will be placed on the `kv.first` diagonal.
+
+# Examples
+```jldoctest
+julia> spdiagm(-1 => [1,2,3,4], 1 => [4,3,2,1])
+5×5 SparseMatrixCSC{Int64,Int64} with 8 stored entries:
+  [2, 1]  =  1
+  [1, 2]  =  4
+  [3, 2]  =  2
+  [2, 3]  =  3
+  [4, 3]  =  3
+  [3, 4]  =  2
+  [5, 4]  =  4
+  [4, 5]  =  1
+```
+"""
+function spdiagm(kv::Pair{<:Integer,<:AbstractVector}...)
+    I, J, V = spdiagm_internal(kv...)
+    n = max(SparseArrays.dimlub(I), SparseArrays.dimlub(J))
+    return sparse(I, J, V, n, n)
+end
+
+## expand a colptr or rowptr into a dense index vector
+function expandptr(V::Vector{<:Integer})
+    if V[1] != 1 throw(ArgumentError("first index must be one")) end
+    res = similar(V, (Int64(V[end]-1),))
+    for i in 1:(length(V)-1), j in V[i]:(V[i+1] - 1); res[j] = i end
+    res
+end
+
+
+function diag(A::SparseMatrixCSC{Tv,Ti}, d::Integer=0) where {Tv,Ti}
+    m, n = size(A)
+    k = Int(d)
+    if !(-m <= k <= n)
+        throw(ArgumentError(string("requested diagonal, $k, must be at least $(-m) ",
+            "and at most $n in an $m-by-$n matrix")))
+    end
+    l = k < 0 ? min(m+k,n) : min(n-k,m)
+    r, c = k <= 0 ? (-k, 0) : (0, k) # start row/col -1
+    ind = Vector{Ti}()
+    val = Vector{Tv}()
+    for i in 1:l
+        r += 1; c += 1
+        r1 = Int(A.colptr[c])
+        r2 = Int(A.colptr[c+1]-1)
+        r1 > r2 && continue
+        r1 = searchsortedfirst(A.rowval, r, r1, r2, Base.Order.Forward)
+        ((r1 > r2) || (A.rowval[r1] != r)) && continue
+        push!(ind, i)
+        push!(val, A.nzval[r1])
+    end
+    return SparseVector{Tv,Ti}(l, ind, val)
+end
+
+function tr(A::SparseMatrixCSC{Tv}) where Tv
+    n = checksquare(A)
+    s = zero(Tv)
+    for i in 1:n
+        s += A[i,i]
+    end
+    return s
+end
+
+
+## rotations
+
+function rot180(A::SparseMatrixCSC)
+    I,J,V = findnz(A)
+    m,n = size(A)
+    for i=1:length(I)
+        I[i] = m - I[i] + 1
+        J[i] = n - J[i] + 1
+    end
+    return sparse(I,J,V,m,n)
+end
+
+function rotr90(A::SparseMatrixCSC)
+    I,J,V = findnz(A)
+    m,n = size(A)
+    #old col inds are new row inds
+    for i=1:length(I)
+        I[i] = m - I[i] + 1
+    end
+    return sparse(J, I, V, n, m)
+end
+
+function rotl90(A::SparseMatrixCSC)
+    I,J,V = findnz(A)
+    m,n = size(A)
+    #old row inds are new col inds
+    for i=1:length(J)
+        J[i] = n - J[i] + 1
+    end
+    return sparse(J, I, V, n, m)
+end
+
+
+## Uniform matrix arithmetic
+
+(+)(A::SparseMatrixCSC, J::UniformScaling) = A + sparse(J, size(A)...)
+(-)(A::SparseMatrixCSC, J::UniformScaling) = A - sparse(J, size(A)...)
+(-)(J::UniformScaling, A::SparseMatrixCSC) = sparse(J, size(A)...) - A
+
+# SparseVector
+
+# the rest of real, conj, imag are handled correctly via AbstractArray methods
+SparseArrays.@unarymap_nz2z_z2z real Complex
+conj(x::SparseVector{<:Complex}) = SparseVector(length(x), copy(SparseArrays.nonzeroinds(x)), conj(nonzeros(x)))
+imag(x::AbstractSparseVector{Tv,Ti}) where {Tv<:Real,Ti<:Integer} = SparseVector(length(x), Ti[], Tv[])
+SparseArrays.@unarymap_nz2z_z2z imag Complex
+
+### linalg.jl
+
+# Transpose
+# (The only sparse matrix structure in base is CSC, so a one-row sparse matrix is worse than dense)
+transpose(sv::SparseVector) = Transpose(sv)
+adjoint(sv::SparseVector) = Adjoint(sv)
+
+### BLAS Level-1
+
+# axpy
+
+function LinearAlgebra.axpy!(a::Number, x::SparseVectorUnion, y::AbstractVector)
+    length(x) == length(y) || throw(DimensionMismatch())
+    nzind = SparseArrays.nonzeroinds(x)
+    nzval = nonzeros(x)
+    m = length(nzind)
+
+    if a == oneunit(a)
+        for i = 1:m
+            @inbounds ii = nzind[i]
+            @inbounds v = nzval[i]
+            y[ii] += v
+        end
+    elseif a == -oneunit(a)
+        for i = 1:m
+            @inbounds ii = nzind[i]
+            @inbounds v = nzval[i]
+            y[ii] -= v
+        end
+    else
+        for i = 1:m
+            @inbounds ii = nzind[i]
+            @inbounds v = nzval[i]
+            y[ii] += a * v
+        end
+    end
+    return y
+end
+
+
+# scaling
+
+function rmul!(x::SparseVectorUnion, a::Real)
+    rmul!(nonzeros(x), a)
+    return x
+end
+function rmul!(x::SparseVectorUnion, a::Complex)
+    rmul!(nonzeros(x), a)
+    return x
+end
+function lmul!(a::Real, x::SparseVectorUnion)
+    rmul!(nonzeros(x), a)
+    return x
+end
+function lmul!(a::Complex, x::SparseVectorUnion)
+    rmul!(nonzeros(x), a)
+    return x
+end
+
+(*)(x::SparseVectorUnion, a::Number) = SparseVector(length(x), copy(SparseArrays.nonzeroinds(x)), nonzeros(x) * a)
+(*)(a::Number, x::SparseVectorUnion) = SparseVector(length(x), copy(SparseArrays.nonzeroinds(x)), a * nonzeros(x))
+(/)(x::SparseVectorUnion, a::Number) = SparseVector(length(x), copy(SparseArrays.nonzeroinds(x)), nonzeros(x) / a)
+
+# dot
+function dot(x::AbstractVector{Tx}, y::SparseVectorUnion{Ty}) where {Tx<:Number,Ty<:Number}
+    n = length(x)
+    length(y) == n || throw(DimensionMismatch())
+    nzind = SparseArrays.nonzeroinds(y)
+    nzval = nonzeros(y)
+    s = dot(zero(Tx), zero(Ty))
+    for i = 1:length(nzind)
+        s += dot(x[nzind[i]], nzval[i])
+    end
+    return s
+end
+
+function dot(x::SparseVectorUnion{Tx}, y::AbstractVector{Ty}) where {Tx<:Number,Ty<:Number}
+    n = length(y)
+    length(x) == n || throw(DimensionMismatch())
+    nzind = SparseArrays.nonzeroinds(x)
+    nzval = nonzeros(x)
+    s = dot(zero(Tx), zero(Ty))
+    @inbounds for i = 1:length(nzind)
+        s += dot(nzval[i], y[nzind[i]])
+    end
+    return s
+end
+
+function _spdot(f::Function,
+                xj::Int, xj_last::Int, xnzind, xnzval,
+                yj::Int, yj_last::Int, ynzind, ynzval)
+    # dot product between ranges of non-zeros,
+    s = zero(eltype(xnzval)) * zero(eltype(ynzval))
+    @inbounds while xj <= xj_last && yj <= yj_last
+        ix = xnzind[xj]
+        iy = ynzind[yj]
+        if ix == iy
+            s += f(xnzval[xj], ynzval[yj])
+            xj += 1
+            yj += 1
+        elseif ix < iy
+            xj += 1
+        else
+            yj += 1
+        end
+    end
+    s
+end
+
+function dot(x::SparseVectorUnion{<:Number}, y::SparseVectorUnion{<:Number})
+    x === y && return sum(abs2, x)
+    n = length(x)
+    length(y) == n || throw(DimensionMismatch())
+
+    xnzind = SparseArrays.nonzeroinds(x)
+    ynzind = SparseArrays.nonzeroinds(y)
+    xnzval = nonzeros(x)
+    ynzval = nonzeros(y)
+
+    _spdot(dot,
+           1, length(xnzind), xnzind, xnzval,
+           1, length(ynzind), ynzind, ynzval)
+end
+
+norm(x::SparseVectorUnion, p::Real=2) = norm(nonzeros(x), p)
+
+### BLAS-2 / dense A * sparse x -> dense y
+
+# lowrankupdate (BLAS.ger! like)
+function LinearAlgebra.lowrankupdate!(A::StridedMatrix, x::AbstractVector, y::SparseVectorUnion, α::Number = 1)
+    nzi = SparseArrays.nonzeroinds(y)
+    nzv = nonzeros(y)
+    @inbounds for (j,v) in zip(nzi,nzv)
+        αv = α*conj(v)
+        for i in axes(x, 1)
+            A[i,j] += x[i]*αv
+        end
+    end
+    return A
+end
+
+# * and mul!
+
+function (*)(A::StridedMatrix{Ta}, x::AbstractSparseVector{Tx}) where {Ta,Tx}
+    m, n = size(A)
+    length(x) == n || throw(DimensionMismatch())
+    Ty = promote_type(Ta, Tx)
+    y = Vector{Ty}(undef, m)
+    mul!(y, A, x)
+end
+
+mul!(y::AbstractVector{Ty}, A::StridedMatrix, x::AbstractSparseVector{Tx}) where {Tx,Ty} =
+    mul!(y, A, x, one(Tx), zero(Ty))
+
+function mul!(y::AbstractVector, A::StridedMatrix, x::AbstractSparseVector, α::Number, β::Number)
+    m, n = size(A)
+    length(x) == n && length(y) == m || throw(DimensionMismatch())
+    m == 0 && return y
+    if β != one(β)
+        β == zero(β) ? fill!(y, zero(eltype(y))) : rmul!(y, β)
+    end
+    α == zero(α) && return y
+
+    xnzind = SparseArrays.nonzeroinds(x)
+    xnzval = nonzeros(x)
+    @inbounds for i = 1:length(xnzind)
+        v = xnzval[i]
+        if v != zero(v)
+            j = xnzind[i]
+            αv = v * α
+            for r = 1:m
+                y[r] += A[r,j] * αv
+            end
+        end
+    end
+    return y
+end
+
+# * and mul!(C, transpose(A), B)
+
+function *(transA::Transpose{<:Any,<:StridedMatrix{Ta}}, x::AbstractSparseVector{Tx}) where {Ta,Tx}
+    A = transA.parent
+    m, n = size(A)
+    length(x) == m || throw(DimensionMismatch())
+    Ty = promote_type(Ta, Tx)
+    y = Vector{Ty}(undef, n)
+    mul!(y, transpose(A), x)
+end
+
+mul!(y::AbstractVector{Ty}, transA::Transpose{<:Any,<:StridedMatrix}, x::AbstractSparseVector{Tx}) where {Tx,Ty} =
+    (A = transA.parent; mul!(y, transpose(A), x, one(Tx), zero(Ty)))
+
+function mul!(y::AbstractVector, transA::Transpose{<:Any,<:StridedMatrix}, x::AbstractSparseVector, α::Number, β::Number)
+    A = transA.parent
+    m, n = size(A)
+    length(x) == m && length(y) == n || throw(DimensionMismatch())
+    n == 0 && return y
+    if β != one(β)
+        β == zero(β) ? fill!(y, zero(eltype(y))) : rmul!(y, β)
+    end
+    α == zero(α) && return y
+
+    xnzind = SparseArrays.nonzeroinds(x)
+    xnzval = nonzeros(x)
+    _nnz = length(xnzind)
+    _nnz == 0 && return y
+
+    s0 = zero(eltype(A)) * zero(eltype(x))
+    @inbounds for j = 1:n
+        s = zero(s0)
+        for i = 1:_nnz
+            s += A[xnzind[i], j] * xnzval[i]
+        end
+        y[j] += s * α
+    end
+    return y
+end
+
+
+### BLAS-2 / sparse A * sparse x -> dense y
+
+function densemv(A::SparseMatrixCSC, x::AbstractSparseVector; trans::AbstractChar='N')
+    local xlen::Int, ylen::Int
+    m, n = size(A)
+    if trans == 'N' || trans == 'n'
+        xlen = n; ylen = m
+    elseif trans == 'T' || trans == 't' || trans == 'C' || trans == 'c'
+        xlen = m; ylen = n
+    else
+        throw(ArgumentError("Invalid trans character $trans"))
+    end
+    xlen == length(x) || throw(DimensionMismatch())
+    T = promote_type(eltype(A), eltype(x))
+    y = Vector{T}(undef, ylen)
+    if trans == 'N' || trans == 'N'
+        mul!(y, A, x)
+    elseif trans == 'T' || trans == 't'
+        mul!(y, transpose(A), x)
+    elseif trans == 'C' || trans == 'c'
+        mul!(y, adjoint(A), x)
+    else
+        throw(ArgumentError("Invalid trans character $trans"))
+    end
+    y
+end
+
+# * and mul!
+
+mul!(y::AbstractVector{Ty}, A::SparseMatrixCSC, x::AbstractSparseVector{Tx}) where {Tx,Ty} =
+    mul!(y, A, x, one(Tx), zero(Ty))
+
+function mul!(y::AbstractVector, A::SparseMatrixCSC, x::AbstractSparseVector, α::Number, β::Number)
+    m, n = size(A)
+    length(x) == n && length(y) == m || throw(DimensionMismatch())
+    m == 0 && return y
+    if β != one(β)
+        β == zero(β) ? fill!(y, zero(eltype(y))) : rmul!(y, β)
+    end
+    α == zero(α) && return y
+
+    xnzind = SparseArrays.nonzeroinds(x)
+    xnzval = nonzeros(x)
+    Acolptr = A.colptr
+    Arowval = A.rowval
+    Anzval = A.nzval
+
+    @inbounds for i = 1:length(xnzind)
+        v = xnzval[i]
+        if v != zero(v)
+            αv = v * α
+            j = xnzind[i]
+            for r = A.colptr[j]:(Acolptr[j+1]-1)
+                y[Arowval[r]] += Anzval[r] * αv
+            end
+        end
+    end
+    return y
+end
+
+# * and *(Tranpose(A), B)
+
+mul!(y::AbstractVector{Ty}, transA::Transpose{<:Any,<:SparseMatrixCSC}, x::AbstractSparseVector{Tx}) where {Tx,Ty} =
+    (A = transA.parent; mul!(y, transpose(A), x, one(Tx), zero(Ty)))
+
+mul!(y::AbstractVector, transA::Transpose{<:Any,<:SparseMatrixCSC}, x::AbstractSparseVector, α::Number, β::Number) =
+    (A = transA.parent; _At_or_Ac_mul_B!(*, y, A, x, α, β))
+
+mul!(y::AbstractVector{Ty}, adjA::Adjoint{<:Any,<:SparseMatrixCSC}, x::AbstractSparseVector{Tx}) where {Tx,Ty} =
+    (A = adjA.parent; mul!(y, adjoint(A), x, one(Tx), zero(Ty)))
+
+mul!(y::AbstractVector, adjA::Adjoint{<:Any,<:SparseMatrixCSC}, x::AbstractSparseVector, α::Number, β::Number) =
+    (A = adjA.parent; _At_or_Ac_mul_B!(dot, y, A, x, α, β))
+
+function _At_or_Ac_mul_B!(tfun::Function,
+                          y::AbstractVector, A::SparseMatrixCSC, x::AbstractSparseVector,
+                          α::Number, β::Number)
+    m, n = size(A)
+    length(x) == m && length(y) == n || throw(DimensionMismatch())
+    n == 0 && return y
+    if β != one(β)
+        β == zero(β) ? fill!(y, zero(eltype(y))) : rmul!(y, β)
+    end
+    α == zero(α) && return y
+
+    xnzind = SparseArrays.nonzeroinds(x)
+    xnzval = nonzeros(x)
+    Acolptr = A.colptr
+    Arowval = A.rowval
+    Anzval = A.nzval
+    mx = length(xnzind)
+
+    for j = 1:n
+        # s <- dot(A[:,j], x)
+        s = _spdot(tfun, Acolptr[j], Acolptr[j+1]-1, Arowval, Anzval,
+                   1, mx, xnzind, xnzval)
+        @inbounds y[j] += s * α
+    end
+    return y
+end
+
+
+### BLAS-2 / sparse A * sparse x -> dense y
+
+function *(A::SparseMatrixCSC, x::AbstractSparseVector)
+    y = densemv(A, x)
+    initcap = min(nnz(A), size(A,1))
+    SparseArrays._dense2sparsevec(y, initcap)
+end
+
+*(transA::Transpose{<:Any,<:SparseMatrixCSC}, x::AbstractSparseVector) =
+    (A = transA.parent; _At_or_Ac_mul_B(*, A, x))
+
+*(adjA::Adjoint{<:Any,<:SparseMatrixCSC}, x::AbstractSparseVector) =
+    (A = adjA.parent; _At_or_Ac_mul_B(dot, A, x))
+
+function _At_or_Ac_mul_B(tfun::Function, A::SparseMatrixCSC{TvA,TiA}, x::AbstractSparseVector{TvX,TiX}) where {TvA,TiA,TvX,TiX}
+    m, n = size(A)
+    length(x) == m || throw(DimensionMismatch())
+    Tv = promote_type(TvA, TvX)
+    Ti = promote_type(TiA, TiX)
+
+    xnzind = SparseArrays.nonzeroinds(x)
+    xnzval = nonzeros(x)
+    Acolptr = A.colptr
+    Arowval = A.rowval
+    Anzval = A.nzval
+    mx = length(xnzind)
+
+    ynzind = Vector{Ti}(undef, n)
+    ynzval = Vector{Tv}(undef, n)
+
+    jr = 0
+    for j = 1:n
+        s = _spdot(tfun, Acolptr[j], Acolptr[j+1]-1, Arowval, Anzval,
+                   1, mx, xnzind, xnzval)
+        if s != zero(s)
+            jr += 1
+            ynzind[jr] = j
+            ynzval[jr] = s
+        end
+    end
+    if jr < n
+        resize!(ynzind, jr)
+        resize!(ynzval, jr)
+    end
+    SparseVector(n, ynzind, ynzval)
+end
+
+
+# define matrix division operations involving triangular matrices and sparse vectors
+# the valid left-division operations are A[t|c]_ldiv_B[!] and \
+# the valid right-division operations are A(t|c)_rdiv_B[t|c][!]
+# see issue #14005 for discussion of these methods
+for isunittri in (true, false), islowertri in (true, false)
+    unitstr = isunittri ? "Unit" : ""
+    halfstr = islowertri ? "Lower" : "Upper"
+    tritype = :(LinearAlgebra.$(Symbol(unitstr, halfstr, "Triangular")))
+
+    # build out-of-place left-division operations
+    for (istrans, applyxform, xformtype, xformop) in (
+            (false, false, :identity,  :identity),
+            (true,  true,  :Transpose, :transpose),
+            (true,  true,  :Adjoint,   :adjoint) )
+
+        # broad method where elements are Numbers
+        xformtritype = applyxform ? :($xformtype{<:TA,<:$tritype{<:Any,<:AbstractMatrix}}) :
+                                    :($tritype{<:TA,<:AbstractMatrix})
+        @eval function \(xformA::$xformtritype, b::SparseVector{Tb}) where {TA<:Number,Tb<:Number}
+            A = $(applyxform ? :(xformA.parent) : :(xformA) )
+            TAb = $(isunittri ?
+                :(typeof(zero(TA)*zero(Tb) + zero(TA)*zero(Tb))) :
+                :(typeof((zero(TA)*zero(Tb) + zero(TA)*zero(Tb))/one(TA))) )
+            LinearAlgebra.ldiv!($xformop(convert(AbstractArray{TAb}, A)), convert(Array{TAb}, b))
+        end
+
+        # faster method requiring good view support of the
+        # triangular matrix type. hence the StridedMatrix restriction.
+        xformtritype = applyxform ? :($xformtype{<:TA,<:$tritype{<:Any,<:StridedMatrix}}) :
+                                    :($tritype{<:TA,<:StridedMatrix})
+        @eval function \(xformA::$xformtritype, b::SparseVector{Tb}) where {TA<:Number,Tb<:Number}
+            A = $(applyxform ? :(xformA.parent) : :(xformA) )
+            TAb = $(isunittri ?
+                :(typeof(zero(TA)*zero(Tb) + zero(TA)*zero(Tb))) :
+                :(typeof((zero(TA)*zero(Tb) + zero(TA)*zero(Tb))/one(TA))) )
+            r = convert(Array{TAb}, b)
+            # If b has no nonzero entries, then r is necessarily zero. If b has nonzero
+            # entries, then the operation involves only b[nzrange], so we extract and
+            # operate on solely b[nzrange] for efficiency.
+            if nnz(b) != 0
+                nzrange = $( (islowertri && !istrans) || (!islowertri && istrans) ?
+                    :(b.nzind[1]:b.n) :
+                    :(1:b.nzind[end]) )
+                nzrangeviewr = view(r, nzrange)
+                nzrangeviewA = $tritype(view(A.data, nzrange, nzrange))
+                LinearAlgebra.ldiv!($xformop(convert(AbstractArray{TAb}, nzrangeviewA)), nzrangeviewr)
+            end
+            r
+        end
+
+        # fallback where elements are not Numbers
+        xformtritype = applyxform ? :($xformtype{<:Any,<:$tritype}) : :($tritype)
+        @eval function \(xformA::$xformtritype, b::SparseVector)
+            A = $(applyxform ? :(xformA.parent) : :(xformA) )
+            LinearAlgebra.ldiv!($xformop(A), copy(b))
+        end
+    end
+
+    # build in-place left-division operations
+    for (istrans, applyxform, xformtype, xformop) in (
+            (false, false, :identity,  :identity),
+            (true,  true,  :Transpose, :transpose),
+            (true,  true,  :Adjoint,   :adjoint) )
+        xformtritype = applyxform ? :($xformtype{<:Any,<:$tritype{<:Any,<:StridedMatrix}}) :
+                                    :($tritype{<:Any,<:StridedMatrix})
+
+        # the generic in-place left-division methods handle these cases, but
+        # we can achieve greater efficiency where the triangular matrix provides
+        # good view support. hence the StridedMatrix restriction.
+        @eval function ldiv!(xformA::$xformtritype, b::SparseVector)
+            A = $(applyxform ? :(xformA.parent) : :(xformA) )
+            # If b has no nonzero entries, the result is necessarily zero and this call
+            # reduces to a no-op. If b has nonzero entries, then...
+            if nnz(b) != 0
+                # densify the relevant part of b in one shot rather
+                # than potentially repeatedly reallocating during the solve
+                $( (islowertri && !istrans) || (!islowertri && istrans) ?
+                    :(_densifyfirstnztoend!(b)) :
+                    :(_densifystarttolastnz!(b)) )
+                # this operation involves only the densified section, so
+                # for efficiency we extract and operate on solely that section
+                # furthermore we operate on that section as a dense vector
+                # such that dispatch has a chance to exploit, e.g., tuned BLAS
+                nzrange = $( (islowertri && !istrans) || (!islowertri && istrans) ?
+                    :(b.nzind[1]:b.n) :
+                    :(1:b.nzind[end]) )
+                nzrangeviewbnz = view(b.nzval, nzrange .- (b.nzind[1] - 1))
+                nzrangeviewA = $tritype(view(A.data, nzrange, nzrange))
+                LinearAlgebra.ldiv!($xformop(nzrangeviewA), nzrangeviewbnz)
+            end
+            b
+        end
+    end
+end
+
+# helper functions for in-place matrix division operations defined above
+"Densifies `x::SparseVector` from its first nonzero (`x[x.nzind[1]]`) through its end (`x[x.n]`)."
+function _densifyfirstnztoend!(x::SparseVector)
+    # lengthen containers
+    oldnnz = nnz(x)
+    newnnz = x.n - x.nzind[1] + 1
+    resize!(x.nzval, newnnz)
+    resize!(x.nzind, newnnz)
+    # redistribute nonzero values over lengthened container
+    # initialize now-allocated zero values simultaneously
+    nextpos = newnnz
+    @inbounds for oldpos in oldnnz:-1:1
+        nzi = x.nzind[oldpos]
+        nzv = x.nzval[oldpos]
+        newpos = nzi - x.nzind[1] + 1
+        newpos < nextpos && (x.nzval[newpos+1:nextpos] .= 0)
+        newpos == oldpos && break
+        x.nzval[newpos] = nzv
+        nextpos = newpos - 1
+    end
+    # finally update lengthened nzinds
+    x.nzind[2:end] = (x.nzind[1]+1):x.n
+    x
+end
+"Densifies `x::SparseVector` from its beginning (`x[1]`) through its last nonzero (`x[x.nzind[end]]`)."
+function _densifystarttolastnz!(x::SparseVector)
+    # lengthen containers
+    oldnnz = nnz(x)
+    newnnz = x.nzind[end]
+    resize!(x.nzval, newnnz)
+    resize!(x.nzind, newnnz)
+    # redistribute nonzero values over lengthened container
+    # initialize now-allocated zero values simultaneously
+    nextpos = newnnz
+    @inbounds for oldpos in oldnnz:-1:1
+        nzi = x.nzind[oldpos]
+        nzv = x.nzval[oldpos]
+        nzi < nextpos && (x.nzval[nzi+1:nextpos] .= 0)
+        nzi == oldpos && (nextpos = 0; break)
+        x.nzval[nzi] = nzv
+        nextpos = nzi - 1
+    end
+    nextpos > 0 && (x.nzval[1:nextpos] .= 0)
+    # finally update lengthened nzinds
+    x.nzind[1:newnnz] = 1:newnnz
+    x
+end
+
 
 ## sparse matrix multiplication
 
@@ -1005,5 +1827,7 @@ function factorize(A::LinearAlgebra.RealHermSymComplexHerm{Float64,<:SparseMatri
 end
 
 eigen(A::SparseMatrixCSC) = error("Use IterativeEigensolvers.eigs() instead of eigen() for sparse matrices.")
+
+include("deprecated.jl")
 
 end

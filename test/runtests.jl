@@ -194,7 +194,6 @@ end
 end
 
 @testset "complex matrix-vector multiplication and left-division" begin
-    if Base.USE_GPL_LIBS
     for i = 1:5
         a = I + 0.1*sprandn(5, 5, 0.2)
         b = randn(5,3) + im*randn(5,3)
@@ -304,7 +303,6 @@ end
         @test (maximum(abs.(a'\b - Array(a')\b)) < 1000*eps())
         @test (maximum(abs.(transpose(a)\b - Array(transpose(a))\b)) < 1000*eps())
     end
-    end
 end
 
 @testset "matrix multiplication" begin
@@ -312,8 +310,8 @@ end
         a = sprand(10, 5, 0.7)
         b = sprand(5, 15, 0.3)
         @test maximum(abs.(a*b - Array(a)*Array(b))) < 100*eps()
-        @test maximum(abs.(SparseArrays.spmatmul(a,b,sortindices=:sortcols) - Array(a)*Array(b))) < 100*eps()
-        @test maximum(abs.(SparseArrays.spmatmul(a,b,sortindices=:doubletranspose) - Array(a)*Array(b))) < 100*eps()
+        @test maximum(abs.(SparseLinearAlgebra.spmatmul(a,b,sortindices=:sortcols) - Array(a)*Array(b))) < 100*eps()
+        @test maximum(abs.(SparseLinearAlgebra.spmatmul(a,b,sortindices=:doubletranspose) - Array(a)*Array(b))) < 100*eps()
         f = Diagonal(rand(5))
         @test Array(a*f) == Array(a)*f
         @test Array(f*b) == f*Array(b)
@@ -1349,11 +1347,9 @@ end
 end
 
 @testset "explicit zeros" begin
-    if Base.USE_GPL_LIBS
-        a = SparseMatrixCSC(2, 2, [1, 3, 5], [1, 2, 1, 2], [1.0, 0.0, 0.0, 1.0])
-        @test lu(a)\[2.0, 3.0] ≈ [2.0, 3.0]
-        @test cholesky(a)\[2.0, 3.0] ≈ [2.0, 3.0]
-    end
+    a = SparseMatrixCSC(2, 2, [1, 3, 5], [1, 2, 1, 2], [1.0, 0.0, 0.0, 1.0])
+    @test lu(a)\[2.0, 3.0] ≈ [2.0, 3.0]
+    @test cholesky(a)\[2.0, 3.0] ≈ [2.0, 3.0]
 end
 
 @testset "issue #9917" begin
@@ -1534,10 +1530,10 @@ end
 
 @testset "expandptr" begin
     local A = sparse(1.0I, 5, 5)
-    @test SparseArrays.expandptr(A.colptr) == 1:5
+    @test SparseLinearAlgebra.expandptr(A.colptr) == 1:5
     A[1,2] = 1
-    @test SparseArrays.expandptr(A.colptr) == [1; 2; 2; 3; 4; 5]
-    @test_throws ArgumentError SparseArrays.expandptr([2; 3])
+    @test SparseLinearAlgebra.expandptr(A.colptr) == [1; 2; 2; 3; 4; 5]
+    @test_throws ArgumentError SparseLinearAlgebra.expandptr([2; 3])
 end
 
 @testset "triu/tril" begin
@@ -1722,12 +1718,10 @@ end
     Ar = sprandn(20, 20,.5) + eps()*I
     @test cond(A, 1) == 1.0
     # For a discussion of the tolerance, see #14778
-    if Base.USE_GPL_LIBS
-        @test 0.99 <= cond(Ar, 1) \ opnorm(Ar, 1) * opnorm(inv(Array(Ar)), 1) < 3
-        @test 0.99 <= cond(Ac, 1) \ opnorm(Ac, 1) * opnorm(inv(Array(Ac)), 1) < 3
-        @test 0.99 <= cond(Ar, Inf) \ opnorm(Ar, Inf) * opnorm(inv(Array(Ar)), Inf) < 3
-        @test 0.99 <= cond(Ac, Inf) \ opnorm(Ac, Inf) * opnorm(inv(Array(Ac)), Inf) < 3
-    end
+    @test 0.99 <= cond(Ar, 1) \ opnorm(Ar, 1) * opnorm(inv(Array(Ar)), 1) < 3
+    @test 0.99 <= cond(Ac, 1) \ opnorm(Ac, 1) * opnorm(inv(Array(Ac)), 1) < 3
+    @test 0.99 <= cond(Ar, Inf) \ opnorm(Ar, Inf) * opnorm(inv(Array(Ar)), Inf) < 3
+    @test 0.99 <= cond(Ac, Inf) \ opnorm(Ac, Inf) * opnorm(inv(Array(Ac)), Inf) < 3
     @test_throws ArgumentError cond(A,2)
     @test_throws ArgumentError cond(A,3)
     Arect = spzeros(10, 6)
@@ -1742,15 +1736,13 @@ end
     Aci = ceil.(Int64, 100*sprand(20,20,.5)) + im*ceil.(Int64, sprand(20,20,.5))
     Ar = sprandn(20,20,.5)
     Ari = ceil.(Int64, 100*Ar)
-    if Base.USE_GPL_LIBS
-        # NOTE: opnormestinv is probabilistic, so requires a fixed seed (set above in srand(1234))
-        @test SparseArrays.opnormestinv(Ac,3) ≈ opnorm(inv(Array(Ac)),1) atol=1e-4
-        @test SparseArrays.opnormestinv(Aci,3) ≈ opnorm(inv(Array(Aci)),1) atol=1e-4
-        @test SparseArrays.opnormestinv(Ar) ≈ opnorm(inv(Array(Ar)),1) atol=1e-4
-        @test_throws ArgumentError SparseArrays.opnormestinv(Ac,0)
-        @test_throws ArgumentError SparseArrays.opnormestinv(Ac,21)
-    end
-    @test_throws DimensionMismatch SparseArrays.opnormestinv(sprand(3,5,.9))
+    # NOTE: opnormestinv is probabilistic, so requires a fixed seed (set above in srand(1234))
+    @test SparseLinearAlgebra.opnormestinv(Ac,3) ≈ opnorm(inv(Array(Ac)),1) atol=1e-4
+    @test SparseLinearAlgebra.opnormestinv(Aci,3) ≈ opnorm(inv(Array(Aci)),1) atol=1e-4
+    @test SparseLinearAlgebra.opnormestinv(Ar) ≈ opnorm(inv(Array(Ar)),1) atol=1e-4
+    @test_throws ArgumentError SparseLinearAlgebra.opnormestinv(Ac,0)
+    @test_throws ArgumentError SparseLinearAlgebra.opnormestinv(Ac,21)
+    @test_throws DimensionMismatch SparseLinearAlgebra.opnormestinv(sprand(3,5,.9))
 end
 
 @testset "issue #13008" begin
@@ -1794,22 +1786,22 @@ end
     local A
     A = sparse(Diagonal(rand(5))) + sprandn(5, 5, 0.2) + im*sprandn(5, 5, 0.2)
     A = A + copy(A')
-    @test !Base.USE_GPL_LIBS || abs(det(factorize(Hermitian(A)))) ≈ abs(det(factorize(Array(A))))
+    @test abs(det(factorize(Hermitian(A)))) ≈ abs(det(factorize(Array(A))))
     A = sparse(Diagonal(rand(5))) + sprandn(5, 5, 0.2) + im*sprandn(5, 5, 0.2)
     A = A*A'
-    @test !Base.USE_GPL_LIBS || abs(det(factorize(Hermitian(A)))) ≈ abs(det(factorize(Array(A))))
+    @test abs(det(factorize(Hermitian(A)))) ≈ abs(det(factorize(Array(A))))
     A = sparse(Diagonal(rand(5))) + sprandn(5, 5, 0.2)
     A = A + copy(transpose(A))
-    @test !Base.USE_GPL_LIBS || abs(det(factorize(Symmetric(A)))) ≈ abs(det(factorize(Array(A))))
+    @test abs(det(factorize(Symmetric(A)))) ≈ abs(det(factorize(Array(A))))
     A = sparse(Diagonal(rand(5))) + sprandn(5, 5, 0.2)
     A = A*transpose(A)
-    @test !Base.USE_GPL_LIBS || abs(det(factorize(Symmetric(A)))) ≈ abs(det(factorize(Array(A))))
+    @test abs(det(factorize(Symmetric(A)))) ≈ abs(det(factorize(Array(A))))
     @test factorize(triu(A)) == triu(A)
     @test isa(factorize(triu(A)), UpperTriangular{Float64, SparseMatrixCSC{Float64, Int}})
     @test factorize(tril(A)) == tril(A)
     @test isa(factorize(tril(A)), LowerTriangular{Float64, SparseMatrixCSC{Float64, Int}})
     C, b = A[:, 1:4], fill(1., size(A, 1))
-    @test !Base.USE_GPL_LIBS || factorize(C)\b ≈ Array(C)\b
+    @test factorize(C)\b ≈ Array(C)\b
     @test_throws ErrorException eigen(A)
     @test_throws ErrorException inv(A)
 end
@@ -1951,7 +1943,7 @@ end
 
 # Check calling of unary minus method specialized for SparseMatrixCSCs
 @testset "issue #19503" begin
-    @test which(-, (SparseMatrixCSC,)).module == SparseArrays
+    @test which(-, (SparseMatrixCSC,)).module == SparseLinearAlgebra
 end
 
 @testset "issue #14398" begin
@@ -2236,6 +2228,316 @@ _length_or_count_or_five(x) = length(x)
         b = trues(25)
         b[[6, 8, 13, 15, 23]] .= false
         @test setindex!(spzeros(5, 5), X, b) == setindex!(zeros(5, 5), X, b)
+    end
+end
+
+# Test temporary fix for issue #16548 in PR #16979. Somewhat brittle. Expect to remove with `\` revisions.
+@testset "issue #16548" begin
+    ms = methods(\, (SparseMatrixCSC, AbstractVecOrMat)).ms
+    @test all(m -> m.module == SparseLinearAlgebra, ms)
+end
+
+### linalg (SparseVector)
+
+### Comparison helper to ensure exact equality with internal structure
+function exact_equal(x::AbstractSparseVector, y::AbstractSparseVector)
+    eltype(x) == eltype(y) &&
+    eltype(SparseArrays.nonzeroinds(x)) == eltype(SparseArrays.nonzeroinds(y)) &&
+    length(x) == length(y) &&
+    SparseArrays.nonzeroinds(x) == SparseArrays.nonzeroinds(y) &&
+    nonzeros(x) == nonzeros(y)
+end
+
+@testset "BLAS Level-1" begin
+
+    let x = sprand(16, 0.5), x2 = sprand(16, 0.4)
+        xf = Array(x)
+        xf2 = Array(x2)
+
+        @testset "axpy!" begin
+            for c in [1.0, -1.0, 2.0, -2.0]
+                y = Array(x)
+                @test LinearAlgebra.axpy!(c, x2, y) === y
+                @test y == Array(x2 * c + x)
+            end
+        end
+        @testset "scale" begin
+            α = 2.5
+            sx = SparseVector(x.n, x.nzind, x.nzval * α)
+            @test exact_equal(x * α, sx)
+            @test exact_equal(x * (α + 0.0*im), complex(sx))
+            @test exact_equal(α * x, sx)
+            @test exact_equal((α + 0.0*im) * x, complex(sx))
+            @test exact_equal(x * α, sx)
+            @test exact_equal(α * x, sx)
+            @test exact_equal(x .* α, sx)
+            @test exact_equal(α .* x, sx)
+            @test exact_equal(x / α, SparseVector(x.n, x.nzind, x.nzval / α))
+
+            xc = copy(x)
+            @test rmul!(xc, α) === xc
+            @test exact_equal(xc, sx)
+            xc = copy(x)
+            @test lmul!(α, xc) === xc
+            @test exact_equal(xc, sx)
+            xc = copy(x)
+            @test rmul!(xc, complex(α, 0.0)) === xc
+            @test exact_equal(xc, sx)
+            xc = copy(x)
+            @test lmul!(complex(α, 0.0), xc) === xc
+            @test exact_equal(xc, sx)
+        end
+
+        @testset "dot" begin
+            dv = dot(xf, xf2)
+            @test dot(x, x) == sum(abs2, x)
+            @test dot(x2, x2) == sum(abs2, x2)
+            @test dot(x, x2) ≈ dv
+            @test dot(x2, x) ≈ dv
+            @test dot(Array(x), x2) ≈ dv
+            @test dot(x, Array(x2)) ≈ dv
+        end
+    end
+
+    let x = complex.(sprand(32, 0.6), sprand(32, 0.6)),
+        y = complex.(sprand(32, 0.6), sprand(32, 0.6))
+        xf = Array(x)::Vector{ComplexF64}
+        yf = Array(y)::Vector{ComplexF64}
+        @test dot(x, x) ≈ dot(xf, xf)
+        @test dot(x, y) ≈ dot(xf, yf)
+    end
+end
+
+@testset "BLAS Level-2" begin
+    @testset "dense A * sparse x -> dense y" begin
+        let A = randn(9, 16), x = sprand(16, 0.7)
+            xf = Array(x)
+            for α in [0.0, 1.0, 2.0], β in [0.0, 0.5, 1.0]
+                y = rand(9)
+                rr = α*A*xf + β*y
+                @test mul!(y, A, x, α, β) === y
+                @test y ≈ rr
+            end
+            y = A*x
+            @test isa(y, Vector{Float64})
+            @test A*x ≈ A*xf
+        end
+
+        let A = randn(16, 9), x = sprand(16, 0.7)
+            xf = Array(x)
+            for α in [0.0, 1.0, 2.0], β in [0.0, 0.5, 1.0]
+                y = rand(9)
+                rr = α*A'xf + β*y
+                @test mul!(y, transpose(A), x, α, β) === y
+                @test y ≈ rr
+            end
+            y = *(transpose(A), x)
+            @test isa(y, Vector{Float64})
+            @test y ≈ *(transpose(A), xf)
+        end
+    end
+    @testset "sparse A * sparse x -> dense y" begin
+        let A = sprandn(9, 16, 0.5), x = sprand(16, 0.7)
+            Af = Array(A)
+            xf = Array(x)
+            for α in [0.0, 1.0, 2.0], β in [0.0, 0.5, 1.0]
+                y = rand(9)
+                rr = α*Af*xf + β*y
+                @test mul!(y, A, x, α, β) === y
+                @test y ≈ rr
+            end
+            y = SparseLinearAlgebra.densemv(A, x)
+            @test isa(y, Vector{Float64})
+            @test y ≈ Af*xf
+        end
+
+        let A = sprandn(16, 9, 0.5), x = sprand(16, 0.7)
+            Af = Array(A)
+            xf = Array(x)
+            for α in [0.0, 1.0, 2.0], β in [0.0, 0.5, 1.0]
+                y = rand(9)
+                rr = α*Af'xf + β*y
+                @test mul!(y, transpose(A), x, α, β) === y
+                @test y ≈ rr
+            end
+            y = SparseLinearAlgebra.densemv(A, x; trans='T')
+            @test isa(y, Vector{Float64})
+            @test y ≈ *(transpose(Af), xf)
+        end
+
+        let A = complex.(sprandn(7, 8, 0.5), sprandn(7, 8, 0.5)),
+            x = complex.(sprandn(8, 0.6), sprandn(8, 0.6)),
+            x2 = complex.(sprandn(7, 0.75), sprandn(7, 0.75))
+            Af = Array(A)
+            xf = Array(x)
+            x2f = Array(x2)
+            @test SparseLinearAlgebra.densemv(A, x; trans='N') ≈ Af * xf
+            @test SparseLinearAlgebra.densemv(A, x2; trans='T') ≈ transpose(Af) * x2f
+            @test SparseLinearAlgebra.densemv(A, x2; trans='C') ≈ Af'x2f
+            @test_throws ArgumentError SparseLinearAlgebra.densemv(A, x; trans='D')
+        end
+    end
+    @testset "sparse A * sparse x -> sparse y" begin
+        let A = sprandn(9, 16, 0.5), x = sprand(16, 0.7), x2 = sprand(9, 0.7)
+            Af = Array(A)
+            xf = Array(x)
+            x2f = Array(x2)
+
+            y = A*x
+            @test isa(y, SparseVector{Float64,Int})
+            @test all(nonzeros(y) .!= 0.0)
+            @test Array(y) ≈ Af * xf
+
+            y = *(transpose(A), x2)
+            @test isa(y, SparseVector{Float64,Int})
+            @test all(nonzeros(y) .!= 0.0)
+            @test Array(y) ≈ Af'x2f
+        end
+
+        let A = complex.(sprandn(7, 8, 0.5), sprandn(7, 8, 0.5)),
+            x = complex.(sprandn(8, 0.6), sprandn(8, 0.6)),
+            x2 = complex.(sprandn(7, 0.75), sprandn(7, 0.75))
+            Af = Array(A)
+            xf = Array(x)
+            x2f = Array(x2)
+
+            y = A*x
+            @test isa(y, SparseVector{ComplexF64,Int})
+            @test Array(y) ≈ Af * xf
+
+            y = *(transpose(A), x2)
+            @test isa(y, SparseVector{ComplexF64,Int})
+            @test Array(y) ≈ transpose(Af) * x2f
+
+            y = *(adjoint(A), x2)
+            @test isa(y, SparseVector{ComplexF64,Int})
+            @test Array(y) ≈ Af'x2f
+        end
+    end
+    @testset "ldiv ops with triangular matrices and sparse vecs (#14005)" begin
+        m = 10
+        sparsefloatvecs = SparseVector[sprand(m, 0.4) for k in 1:3]
+        sparseintvecs = SparseVector[SparseVector(m, sprvec.nzind, round.(Int, sprvec.nzval*10)) for sprvec in sparsefloatvecs]
+        sparsecomplexvecs = SparseVector[SparseVector(m, sprvec.nzind, complex.(sprvec.nzval, sprvec.nzval)) for sprvec in sparsefloatvecs]
+
+        sprmat = sprand(m, m, 0.2)
+        sparsefloatmat = I + sprmat/(2m)
+        sparsecomplexmat = I + SparseMatrixCSC(m, m, sprmat.colptr, sprmat.rowval, complex.(sprmat.nzval, sprmat.nzval)/(4m))
+        sparseintmat = 10m*I + SparseMatrixCSC(m, m, sprmat.colptr, sprmat.rowval, round.(Int, sprmat.nzval*10))
+
+        denseintmat = I*10m + rand(1:m, m, m)
+        densefloatmat = I + randn(m, m)/(2m)
+        densecomplexmat = I + randn(Complex{Float64}, m, m)/(4m)
+
+        inttypes = (Int32, Int64, BigInt)
+        floattypes = (Float32, Float64, BigFloat)
+        complextypes = (Complex{Float32}, Complex{Float64})
+        eltypes = (inttypes..., floattypes..., complextypes...)
+
+        for eltypemat in eltypes
+            (densemat, sparsemat) = eltypemat in inttypes ? (denseintmat, sparseintmat) :
+                                    eltypemat in floattypes ? (densefloatmat, sparsefloatmat) :
+                                    eltypemat in complextypes && (densecomplexmat, sparsecomplexmat)
+            densemat = convert(Matrix{eltypemat}, densemat)
+            sparsemat = convert(SparseMatrixCSC{eltypemat}, sparsemat)
+            trimats = (LowerTriangular(densemat), UpperTriangular(densemat),
+                       LowerTriangular(sparsemat), UpperTriangular(sparsemat) )
+            unittrimats = (LinearAlgebra.UnitLowerTriangular(densemat), LinearAlgebra.UnitUpperTriangular(densemat),
+                           LinearAlgebra.UnitLowerTriangular(sparsemat), LinearAlgebra.UnitUpperTriangular(sparsemat) )
+
+            for eltypevec in eltypes
+                spvecs = eltypevec in inttypes ? sparseintvecs :
+                         eltypevec in floattypes ? sparsefloatvecs :
+                         eltypevec in complextypes && sparsecomplexvecs
+                spvecs = SparseVector[SparseVector(m, spvec.nzind, convert(Vector{eltypevec}, spvec.nzval)) for spvec in spvecs]
+
+                for spvec in spvecs
+                    fspvec = convert(Array, spvec)
+                    # test out-of-place left-division methods
+                    for mat in (trimats..., unittrimats...)
+                        @test \(mat, spvec)            ≈ \(mat, fspvec)
+                        @test \(adjoint(mat), spvec)   ≈ \(adjoint(mat), fspvec)
+                        @test \(transpose(mat), spvec) ≈ \(transpose(mat), fspvec)
+                    end
+                    # test in-place left-division methods not involving quotients
+                    if eltypevec == typeof(zero(eltypemat)*zero(eltypevec) + zero(eltypemat)*zero(eltypevec))
+                        for mat in unittrimats
+                            @test ldiv!(mat, copy(spvec)) ≈ ldiv!(mat, copy(fspvec))
+                            @test ldiv!(adjoint(mat), copy(spvec)) ≈ ldiv!(adjoint(mat), copy(fspvec))
+                            @test ldiv!(transpose(mat), copy(spvec)) ≈ ldiv!(transpose(mat), copy(fspvec))
+                        end
+                    end
+                    # test in-place left-division methods involving quotients
+                    if eltypevec == typeof((zero(eltypemat)*zero(eltypevec) + zero(eltypemat)*zero(eltypevec))/one(eltypemat))
+                        for mat in trimats
+                            @test ldiv!(mat, copy(spvec)) ≈ ldiv!(mat, copy(fspvec))
+                            @test ldiv!(adjoint(mat), copy(spvec)) ≈ ldiv!(adjoint(mat), copy(fspvec))
+                            @test ldiv!(transpose(mat), copy(spvec)) ≈ ldiv!(transpose(mat), copy(fspvec))
+                        end
+                    end
+                end
+            end
+        end
+    end
+    @testset "#16716" begin
+        # The preceding tests miss the edge case where the sparse vector is empty
+        origmat = [-1.5 -0.7; 0.0 1.0]
+        transmat = copy(origmat')
+        utmat = UpperTriangular(origmat)
+        ltmat = LowerTriangular(transmat)
+        uutmat = LinearAlgebra.UnitUpperTriangular(origmat)
+        ultmat = LinearAlgebra.UnitLowerTriangular(transmat)
+
+        zerospvec = spzeros(Float64, 2)
+        zerodvec = zeros(Float64, 2)
+
+        for mat in (utmat, ltmat, uutmat, ultmat)
+            @test isequal(\(mat, zerospvec), zerodvec)
+            @test isequal(\(adjoint(mat), zerospvec), zerodvec)
+            @test isequal(\(transpose(mat), zerospvec), zerodvec)
+            @test isequal(ldiv!(mat, copy(zerospvec)), zerospvec)
+            @test isequal(ldiv!(adjoint(mat), copy(zerospvec)), zerospvec)
+            @test isequal(ldiv!(transpose(mat), copy(zerospvec)), zerospvec)
+        end
+    end
+end
+
+@testset "Fast operations on full column views" begin
+    n = 1000
+    A = sprandn(n, n, 0.01)
+    for j in 1:5:n
+        Aj, Ajview = A[:, j], view(A, :, j)
+        @test norm(Aj)          == norm(Ajview)
+        @test dot(Aj, copy(Aj)) == dot(Ajview, Aj) # don't alias since it takes a different code path
+        @test rmul!(Aj, 0.1)    == rmul!(Ajview, 0.1)
+        @test Aj*0.1            == Ajview*0.1
+        @test 0.1*Aj            == 0.1*Ajview
+        @test Aj/0.1            == Ajview/0.1
+        @test LinearAlgebra.axpy!(1.0, Aj,     sparse(fill(1., n))) ==
+              LinearAlgebra.axpy!(1.0, Ajview, sparse(fill(1., n)))
+        @test LinearAlgebra.lowrankupdate!(Matrix(1.0*I, n, n), fill(1.0, n), Aj) ==
+              LinearAlgebra.lowrankupdate!(Matrix(1.0*I, n, n), fill(1.0, n), Ajview)
+    end
+end
+
+
+spv_x1 = SparseVector(8, [2, 5, 6], [1.25, -0.75, 3.5])
+spv_x2 = SparseVector(8, [1, 2, 6, 7], [3.25, 4.0, -5.5, -6.0])
+
+@testset "Arithmetic operations" begin
+
+    let x = spv_x1, x2 = spv_x2
+
+        # real, imag and conj
+
+        @test real(x) === x
+        @test exact_equal(imag(x), spzeros(Float64, length(x)))
+        @test conj(x) === x
+
+        xcp = complex.(x, x2)
+        @test exact_equal(real(xcp), x)
+        @test exact_equal(imag(xcp), x2)
+        @test exact_equal(conj(xcp), complex.(x, -x2))
     end
 end
 
